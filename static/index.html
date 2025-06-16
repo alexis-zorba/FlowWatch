@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://cdn.jsdelivr.net; script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline' 'unsafe-eval'; connect-src 'self' http://127.0.0.1:5000; style-src 'self' 'unsafe-inline'; font-src 'self' data: https://cdn.jsdelivr.net;">
+  <title>Monitor Banda &amp; Processi</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    h1 { margin-bottom: 5px; }
+    #ts { color: #666; font-size: 0.9em; }
+    #error { color: red; margin: 10px 0; }
+
+    /* KPI cards */
+    #kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px,1fr)); gap: 10px; margin: 20px 0; }
+    .card { background: #f9f9f9; padding: 10px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); text-align: center; }
+    .card h3 { margin: 5px 0; font-size: 1.1em; }
+    .card p { margin: 0; font-size: 1.4em; font-weight: bold; }
+
+    /* Chart */
+    #chart-container { width: 100%; max-width: 800px; margin: auto; }
+
+    /* Tables */
+    table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+    th, td { border: 1px solid #ccc; padding: 6px; text-align: left; }
+    th { background: #f4f4f4; }
+    .scrollable { max-width: 300px; white-space: nowrap; overflow-x: auto; }
+    .suspicious { background-color: #ffe6e6; }
+  </style>
+</head>
+<body>
+  <h1>📊 Monitor Banda &amp; Processi</h1>
+  <div id="ts">--</div>
+  <div id="error"></div>
+
+  <!-- Pulsante di esportazione -->
+  <button id="exportBtn" style="margin-bottom: 10px; padding: 6px 12px;">Esporta dati JSON</button>
+
+  <!-- KPI -->
+  <div id="kpis">
+    <div class="card"><h3>Rx Ist</h3><p id="kpi-rx">--</p></div>
+    <div class="card"><h3>Tx Ist</h3><p id="kpi-tx">--</p></div>
+    <div class="card"><h3>Rx Cum</h3><p id="kpi-crx">0 B</p></div>
+    <div class="card"><h3>Tx Cum</h3><p id="kpi-ctx">0 B</p></div>
+  </div>
+
+  <!-- Grafico -->
+  <div id="chart-container"><canvas id="chart"></canvas></div>
+
+  <!-- Tabelle interfacce -->
+  <h2>Interfacce di Rete</h2>
+  <table id="ifaceTbl">
+    <thead><tr><th>Interfaccia</th><th>Rx B/s</th><th>Tx B/s</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <!-- Top 10 Delta -->
+  <h2>Top 10 Processi per I/O Delta</h2>
+  <table id="procDeltaTbl">
+    <thead><tr><th>PID</th><th>Processo</th><th>Path</th><th>I/O Δ B/s</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <!-- Top 10 Cumulati -->
+  <h2>Top 10 Processi per I/O Cumulato</h2>
+  <table id="procCumTbl">
+    <thead><tr><th>PID</th><th>Processo</th><th>Path</th><th>I/O Totali B</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    const MAX_POINTS = 30, INTERVAL = 2000;
+    let rxData = [], txData = [], labels = [], cumRx = 0, cumTx = 0;
+    const errorEl = document.getElementById('error');
+    const API_URL = window.location.origin + '/stats';
+    const ctx = document.getElementById('chart').getContext('2d');
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: { labels, datasets: [
+        { label: 'Rx B/s', data: rxData, fill: false, tension: 0.3 },
+        { label: 'Tx B/s', data: txData, fill: false, tension: 0.3 }
+      ]},
+      options: { responsive: true, scales: { x: { display: false } }}
+    });
+
+    function format(b){ if(typeof b!=='number'||isNaN(b)) return '-'; if(b>1e6) return (b/1e6).toFixed(2)+' MB/s'; if(b>1e3) return (b/1e3).toFixed(2)+' KB/s'; return b.toFixed(0)+' B/s'; }
+    function formatBytes(b){ if(typeof b!=='number'||isNaN(b)) return '-'; if(b>1e9) return (b/1e9).toFixed(2)+' GB'; if(b>1e6) return (b/1e6).toFixed(2)+' MB'; if(b>1e3) return (b/1e3).toFixed(2)+' KB'; return b.toFixed(0)+' B'; }
+    function formatRaw(b){ if(typeof b!=='number'||isNaN(b)) return '-'; return b.toLocaleString(); }
+
+    async function refresh(){
+      errorEl.innerText = '';
+      try{
+        const res = await fetch(API_URL);
+        if(!res.ok) throw new Error(res.status);
+        const js = await res.json();
+        const total_rx = js.total_rx||0, total_tx = js.total_tx||0, ts = js.ts||Math.floor(Date.now()/1000);
+        document.getElementById('ts').innerText = 'Aggiornato: '+new Date(ts*1000).toLocaleTimeString();
+        document.getElementById('kpi-rx').innerText = format(total_rx);
+        document.getElementById('kpi-tx').innerText = format(total_tx);
+        cumRx += total_rx*(INTERVAL/1000); cumTx += total_tx*(INTERVAL/1000);
+        document.getElementById('kpi-crx').innerText = formatBytes(cumRx);
+        document.getElementById('kpi-ctx').innerText = formatBytes(cumTx);
+        labels.push(''); rxData.push(total_rx); txData.push(total_tx);
+        if(labels.length>MAX_POINTS){ labels.shift(); rxData.shift(); txData.shift(); }
+        chart.update();
+
+        // Interfacce
+        const ib = document.querySelector('#ifaceTbl tbody'); ib.innerHTML = '';
+        (js.ifaces||[]).forEach(i=>{
+          const r = ib.insertRow();
+          r.insertCell().innerText = i.name;
+          r.insertCell().innerText = format(i.rx);
+          r.insertCell().innerText = format(i.tx);
+        });
+        
+        // Processi Delta
+        const pd = document.querySelector('#procDeltaTbl tbody'); pd.innerHTML = '';
+        (js.procs_delta||[]).forEach(p=>{
+          const r = pd.insertRow();
+          if(p.suspicious) r.classList.add('suspicious');
+          r.insertCell().innerText = p.pid;
+          r.insertCell().innerText = p.name;
+          const pc = r.insertCell(); pc.className='scrollable'; pc.innerText = p.path;
+          r.insertCell().innerText = format(p.io_delta);
+        });
+
+        // Processi Cumulati
+        const pcum = document.querySelector('#procCumTbl tbody'); pcum.innerHTML = '';
+        (js.procs_cum||[]).forEach(p=>{
+          const r = pcum.insertRow();
+          if(p.suspicious) r.classList.add('suspicious');
+          r.insertCell().innerText = p.pid;
+          r.insertCell().innerText = p.name;
+          const pc = r.insertCell(); pc.className='scrollable'; pc.innerText = p.path;
+          r.insertCell().innerText = formatRaw(p.io_cum);
+        });
+
+      } catch(e) {
+        console.error('Refresh error:', e);
+        errorEl.innerText = 'Errore: ' + e.message;
+      }
+    }
+    window.onload = ()=>{ refresh(); setInterval(refresh, INTERVAL); document.getElementById('exportBtn').addEventListener('click', exportData); };
+
+    // Funzione di esportazione
+    let latestStats = null;
+    async function exportData() {
+      if (!latestStats) {
+        latestStats = await fetch(API_URL).then(r=>r.ok? r.json(): Promise.reject(r.status));
+      }
+      const dataStr = JSON.stringify(latestStats, null, 2);
+      const blob = new Blob([dataStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `stats_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+  </script>
+</body>
+</html>
